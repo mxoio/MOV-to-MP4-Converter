@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 import subprocess
 import threading
 import sys
+import platform
 from pathlib import Path
 
 class VideoConverter:
@@ -89,19 +90,145 @@ class VideoConverter:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
     
+    def get_os_info(self):
+        """Get operating system information."""
+        system = platform.system().lower()
+        return system
+    
+    def get_install_command(self):
+        """Get the appropriate FFmpeg install command for the current OS."""
+        system = self.get_os_info()
+        
+        commands = {
+            'windows': {
+                'check': ['choco', '--version'],
+                'install': ['choco', 'install', 'ffmpeg-full', '-y'],
+                'manager': 'Chocolatey',
+                'install_manager': 'Install Chocolatey from https://chocolatey.org/'
+            },
+            'darwin': {  # macOS
+                'check': ['brew', '--version'],
+                'install': ['brew', 'install', 'ffmpeg'],
+                'manager': 'Homebrew',
+                'install_manager': 'Install Homebrew: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+            },
+            'linux': {
+                'check': ['apt', '--version'],
+                'install': ['sudo', 'apt', 'update', '&&', 'sudo', 'apt', 'install', 'ffmpeg', '-y'],
+                'manager': 'APT',
+                'install_manager': 'APT should be available by default on Ubuntu/Debian'
+            }
+        }
+        
+        return commands.get(system, None)
+    
+    def check_package_manager(self):
+        """Check if the system package manager is available."""
+        cmd_info = self.get_install_command()
+        if not cmd_info:
+            return False
+            
+        try:
+            subprocess.run(cmd_info['check'], stdout=subprocess.DEVNULL, 
+                         stderr=subprocess.DEVNULL, check=True)
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
+    
+    def install_ffmpeg_automatically(self):
+        """Attempt to install FFmpeg using the system package manager."""
+        cmd_info = self.get_install_command()
+        if not cmd_info:
+            messagebox.showerror("Unsupported OS", 
+                               "Automatic FFmpeg installation is not supported on this operating system.")
+            return False
+        
+        if not self.check_package_manager():
+            messagebox.showerror(f"{cmd_info['manager']} Not Found", 
+                               f"{cmd_info['manager']} is required for automatic installation.\n\n"
+                               f"{cmd_info['install_manager']}")
+            return False
+        
+        # Show confirmation dialog
+        system = self.get_os_info().title()
+        if system == 'Darwin':
+            system = 'macOS'
+        
+        confirm_msg = (f"FFmpeg not found. Would you like to install it automatically?\n\n"
+                      f"System: {system}\n"
+                      f"Package Manager: {cmd_info['manager']}\n"
+                      f"Command: {' '.join(cmd_info['install'])}\n\n"
+                      f"This may take a few minutes and require administrator privileges.")
+        
+        if not messagebox.askyesno("Install FFmpeg?", confirm_msg):
+            return False
+        
+        # Show progress dialog
+        progress_window = tk.Toplevel(self.root)
+        progress_window.title("Installing FFmpeg")
+        progress_window.geometry("400x100")
+        progress_window.transient(self.root)
+        progress_window.grab_set()
+        
+        ttk.Label(progress_window, text="Installing FFmpeg... Please wait.").pack(pady=10)
+        progress_bar = ttk.Progressbar(progress_window, mode='indeterminate')
+        progress_bar.pack(pady=10, padx=20, fill='x')
+        progress_bar.start()
+        
+        def install_worker():
+            try:
+                if self.get_os_info() == 'linux':
+                    # For Linux, run update and install separately
+                    subprocess.run(['sudo', 'apt', 'update'], check=True)
+                    subprocess.run(['sudo', 'apt', 'install', 'ffmpeg', '-y'], check=True)
+                else:
+                    subprocess.run(cmd_info['install'], check=True)
+                
+                progress_window.after(0, lambda: self.installation_complete(progress_window, True))
+            except subprocess.CalledProcessError as e:
+                progress_window.after(0, lambda: self.installation_complete(progress_window, False, str(e)))
+            except Exception as e:
+                progress_window.after(0, lambda: self.installation_complete(progress_window, False, str(e)))
+        
+        # Start installation in background thread
+        install_thread = threading.Thread(target=install_worker)
+        install_thread.daemon = True
+        install_thread.start()
+        
+        return True
+    
+    def installation_complete(self, progress_window, success, error_msg=None):
+        """Handle installation completion."""
+        progress_window.destroy()
+        
+        if success:
+            messagebox.showinfo("Installation Complete", 
+                              "FFmpeg has been installed successfully!\n\n"
+                              "You may need to restart the application.")
+            # Try to find FFmpeg again
+            self.check_ffmpeg()
+        else:
+            messagebox.showerror("Installation Failed", 
+                               f"Failed to install FFmpeg automatically.\n\n"
+                               f"Error: {error_msg}\n\n"
+                               f"Please install FFmpeg manually.")
+    
     def check_ffmpeg(self):
         """Check if FFmpeg is installed."""
         # Get the directory where this script is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
         
-        # Common FFmpeg paths to check (prioritizing bundled version)
+        # Common FFmpeg paths to check
         ffmpeg_paths = [
-            os.path.join(script_dir, "ffmpeg", "ffmpeg.exe"),  # Bundled with project
-            os.path.join(script_dir, "ffmpeg", "ffmpeg"),      # Unix-style bundled
             "ffmpeg",  # If in PATH
+            os.path.join(script_dir, "ffmpeg", "ffmpeg.exe"),  # Bundled with project (Windows)
+            os.path.join(script_dir, "ffmpeg", "ffmpeg"),      # Bundled with project (Unix)
             r"C:\ProgramData\chocolatey\lib\ffmpeg-full\tools\ffmpeg\bin\ffmpeg.exe",
             r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe",
             r"C:\ffmpeg\bin\ffmpeg.exe",
+            "/usr/local/bin/ffmpeg",  # Common macOS Homebrew path
+            "/opt/homebrew/bin/ffmpeg",  # Apple Silicon Homebrew path
+            "/usr/bin/ffmpeg",  # Common Linux path
         ]
         
         self.ffmpeg_path = None
@@ -111,18 +238,43 @@ class VideoConverter:
                              stderr=subprocess.DEVNULL, check=True)
                 self.ffmpeg_path = path
                 print(f"Found FFmpeg at: {path}")
-                break
+                return  # FFmpeg found, exit method
             except (subprocess.CalledProcessError, FileNotFoundError):
                 continue
         
+        # FFmpeg not found - offer automatic installation
         if not self.ffmpeg_path:
-            messagebox.showerror("FFmpeg Not Found", 
-                               "FFmpeg is required for video conversion.\n\n"
-                               "Please install FFmpeg:\n"
-                               "- Windows: choco install ffmpeg-full\n"
-                               "- macOS: brew install ffmpeg\n"
-                               "- Linux: sudo apt install ffmpeg")
-            self.root.quit()
+            system_name = platform.system()
+            if system_name == 'Darwin':
+                system_name = 'macOS'
+            
+            install_msg = (f"FFmpeg is required for video conversion but was not found.\n\n"
+                          f"Would you like to install it automatically using your system's package manager?\n\n"
+                          f"System: {system_name}")
+            
+            if messagebox.askyesno("FFmpeg Not Found", install_msg):
+                if not self.install_ffmpeg_automatically():
+                    # If automatic installation failed or was cancelled
+                    self.show_manual_install_instructions()
+                    self.root.quit()
+            else:
+                self.show_manual_install_instructions()
+                self.root.quit()
+    
+    def show_manual_install_instructions(self):
+        """Show manual installation instructions."""
+        system = self.get_os_info()
+        
+        instructions = {
+            'windows': "Install FFmpeg:\n• Install Chocolatey: https://chocolatey.org/\n• Run: choco install ffmpeg-full",
+            'darwin': "Install FFmpeg:\n• Install Homebrew: https://brew.sh/\n• Run: brew install ffmpeg",
+            'linux': "Install FFmpeg:\n• Run: sudo apt update && sudo apt install ffmpeg\n• Or use your distribution's package manager"
+        }
+        
+        instruction = instructions.get(system, "Please install FFmpeg for your operating system")
+        
+        messagebox.showinfo("Manual Installation Required", 
+                          f"FFmpeg installation was cancelled or failed.\n\n{instruction}")
     
     def select_files(self):
         """Open file dialog to select MOV files."""
@@ -288,11 +440,14 @@ def command_line_converter():
     # Check FFmpeg
     script_dir = os.path.dirname(os.path.abspath(__file__))
     ffmpeg_paths = [
-        os.path.join(script_dir, "ffmpeg", "ffmpeg.exe"),  # Bundled with project
-        os.path.join(script_dir, "ffmpeg", "ffmpeg"),      # Unix-style bundled
         "ffmpeg",  # If in PATH
+        os.path.join(script_dir, "ffmpeg", "ffmpeg.exe"),  # Bundled (Windows)
+        os.path.join(script_dir, "ffmpeg", "ffmpeg"),      # Bundled (Unix)
         r"C:\ProgramData\chocolatey\lib\ffmpeg-full\tools\ffmpeg\bin\ffmpeg.exe",
         r"C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\ffmpeg.exe",
+        "/usr/local/bin/ffmpeg",  # macOS Homebrew
+        "/opt/homebrew/bin/ffmpeg",  # Apple Silicon Homebrew
+        "/usr/bin/ffmpeg",  # Linux
     ]
     
     ffmpeg_path = None
@@ -307,7 +462,13 @@ def command_line_converter():
     
     if not ffmpeg_path:
         print("Error: FFmpeg is not installed or not found")
-        print("Please ensure FFmpeg executables are in the 'ffmpeg' folder or install FFmpeg system-wide")
+        system = platform.system().lower()
+        if system == 'windows':
+            print("Install with: choco install ffmpeg-full")
+        elif system == 'darwin':
+            print("Install with: brew install ffmpeg")
+        elif system == 'linux':
+            print("Install with: sudo apt install ffmpeg")
         return
     
     converter = VideoConverter()
